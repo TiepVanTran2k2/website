@@ -1,0 +1,49 @@
+image: docker:stable
+variables:
+  V_IMAGE_NAME: "$CI_PROJECT_NAME"
+  V_DOCKER_IMAGE: "${V_DOCKER_HUB_USER}/$CI_COMMIT_BRANCH.$V_IMAGE_NAME"
+  V_DOCKER_FILE_NAME: "./Dockerfile"
+  V_SERVICE_NAME: "$CI_PROJECT_NAME"
+  V_ENVIRONMENT_NAME: "$CI_COMMIT_BRANCH"
+
+stages:          # List of stages for jobs, and their order of execution
+  - build
+  - deploy
+
+build-job:       # This job runs in the build stage, which runs first.
+  stage: build
+  tags: ["runner-docker"]
+  before_script:
+    - docker login -u $V_DOCKER_HUB_USER -p $V_DOCKER_HUB_PASS $V_DOCKER_HUB_URL
+  script:
+    - docker build -t ${V_DOCKER_IMAGE}:${CI_COMMIT_SHORT_SHA} -f $V_DOCKER_FILE_NAME .
+    - docker tag ${V_DOCKER_IMAGE}:${CI_COMMIT_SHORT_SHA} ${V_DOCKER_IMAGE}:latest
+    - docker push ${V_DOCKER_IMAGE}:${CI_COMMIT_SHORT_SHA}
+    - docker push ${V_DOCKER_IMAGE}:latest
+
+deploy-k8s-job:      # This job runs in the deploy stage.
+  stage: deploy  # It only runs when *both* jobs in the test stage complete successfully.
+  tags: ["runner-docker"]
+  image: cylab/kubectl
+  before_script:
+    - |-
+      if [[ $CI_COMMIT_BRANCH == "$V_BRANCH_PRO" ]]; then
+        kubectl config set-cluster deploy-cluster --server="$V_SERVER_PRO_IP" --insecure-skip-tls-verify
+        kubectl config set-credentials gitlab --token=$V_SERVER_PRO_TOKEN
+      else
+        kubectl config set-cluster deploy-cluster --server="$V_SERVER_UAT_IP" --insecure-skip-tls-verify
+        kubectl config set-credentials gitlab --token=$V_SERVER_UAT_TOKEN
+      fi
+
+    - kubectl config set-context deploy-cluster --cluster=deploy-cluster --namespace=$V_NAME_SPACE --user=gitlab
+    - kubectl config use-context deploy-cluster
+  script:
+    - export V_SERVICE_NAME=$(echo "$V_SERVICE_NAME" | sed -r 's/[.]+/-/g')
+    - sed -i 's/Development/AcceptanceTestUrl/g' ./template-deployment.yaml
+    - sed -i "s|DOCKER_IMAGE|${V_DOCKER_IMAGE}:${CI_COMMIT_SHORT_SHA}|g" ./template-deployment.yaml
+    - sed -i "s|SERVICE_NAME|${V_SERVICE_NAME}|g" ./template-deployment.yaml
+    - sed -i "s|ENVIRONMENT_NAME|${V_ENVIRONMENT_NAME}|g" ./template-deployment.yaml
+    - sed -i "s|SECRECT_NAME|${V_SECRECT_NAME}|g" ./template-deployment.yaml
+    - sed -i "s|NAME_SPACE|${V_NAME_SPACE}|g" ./template-deployment.yaml
+    - cat ./template-deployment.yaml
+    - kubectl apply -f template-deployment.yaml --v=9
